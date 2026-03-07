@@ -1,7 +1,7 @@
 # CLAUDE.md — Multi-Tenant Website Platform
 
-> Version 2.0 — Covers all architectural decisions including multi-tenancy,
-> dynamic navigation, music player, Printful integration, and RBAC.
+> Version 3.0 — Updated infrastructure: Hetzner VPS + Cloudflare (CDN, SSL, WAF, DNS).
+> Replaces DigitalOcean + Certbot + manual Nginx with Hetzner + Cloudflare + Coolify.
 > Drop this file in the repo root. Claude Code reads it automatically.
 
 ---
@@ -9,12 +9,14 @@
 ## Platform Overview
 
 A single Next.js + Payload CMS application serving multiple independent websites
-from one DigitalOcean Droplet. Each site (tenant) has its own domain, branding,
-navigation structure, content editors, and feature set — all managed from one
-Payload admin interface.
+from one Hetzner VPS, with Cloudflare handling SSL, CDN, DDoS protection, and
+DNS in front of it. Each site (tenant) has its own domain, branding, navigation
+structure, content editors, and feature set — all managed from one Payload admin.
 
 **Initial deployment:** erinshoreprod.com (and additional tenant sites)
-**Hosting:** DigitalOcean General Purpose 2 vCPU / 4 GB — $24/mo
+**VPS:** Hetzner CX22 — 2 vCPU / 4 GB RAM / 40 GB NVMe — ~$6/mo
+**Edge:** Cloudflare Free — SSL, CDN, DDoS, WAF, DNS — $0/mo
+**Deployment:** Coolify (self-hosted PaaS on Hetzner — git push deploy)
 **Traffic:** 100–200 visitors/month per site
 
 ---
@@ -23,8 +25,9 @@ Payload admin interface.
 
 | Layer | Package |
 |---|---|
-| Framework | `next` 14+ (App Router, TypeScript strict) |
+| Framework | `next` 15+ (App Router, TypeScript strict) |
 | CMS | `payload` v3 + `@payloadcms/plugin-multi-tenant` |
+| Database | PostgreSQL 16 via `@payloadcms/db-postgres` |
 | UI | `react-bootstrap` + `bootstrap` 5 |
 | Forms | `react-hook-form` + `zod` |
 | State | `zustand` (cart, UI) |
@@ -34,12 +37,55 @@ Payload admin interface.
 | Merch | Printful REST API (via `/lib/printful.ts`) |
 | Email | `resend` + React Email templates |
 | Images | `next/image` + local `/public/images/[tenant]/` |
-| Database | MongoDB Atlas (Payload adapter) |
 | Auth | `next-auth` v5 (Auth.js) |
 | SEO | Next.js Metadata API + `next-sitemap` |
-| Server | Nginx + PM2 + Certbot (Let's Encrypt) on Ubuntu 24.04 |
-| Security | `arcjet` + CSP headers |
+| VPS | Hetzner CX22 — Ubuntu 24.04 LTS |
+| Edge / CDN / SSL | Cloudflare Free (sits in front of Hetzner) |
+| Deployment | Coolify (self-hosted, installed on Hetzner) |
+| Reverse Proxy | Traefik (via Coolify — no manual Nginx config) |
+| Security | Cloudflare WAF + `arcjet` (API rate limiting) + CSP headers |
 | Monitoring | `@sentry/nextjs` |
+| Analytics | Cloudflare Web Analytics (free, cookie-free, GDPR-compliant) |
+
+
+---
+
+## Infrastructure — How It Fits Together
+
+```
+Browser
+  → Cloudflare Edge (SSL termination, CDN cache, WAF, DDoS protection)
+    → Cache HIT: serves static asset from edge (0 origin requests)
+    → Cache MISS: forwards to Hetzner over encrypted tunnel
+        → Traefik reverse proxy (via Coolify, port 443)
+          → Next.js app (port 3002 locally / 3000 in prod)
+            → middleware.ts: Host header → tenant lookup
+              → Payload CMS + PostgreSQL
+```
+
+**Cloudflare handles:** SSL for all domains automatically, global CDN caching,
+DDoS mitigation, WAF, bot filtering, DNS for all tenant domains.
+
+**Certbot / Let's Encrypt is NOT used.** SSL = Cloudflare Universal SSL
+(browser → Cloudflare) + Cloudflare Origin Certificate (Cloudflare → Hetzner).
+Set SSL/TLS mode to "Full (Strict)" in Cloudflare dashboard.
+
+**Nginx is NOT used.** Coolify runs Traefik internally as the reverse proxy.
+Adding a new domain = Cloudflare dashboard (DNS A record) + Coolify dashboard
+(domain routing). No SSH required to add a new tenant site.
+
+---
+
+## Adding a New Tenant Domain
+
+1. Point domain registrar nameservers → Cloudflare
+2. Cloudflare DNS → Add A record: `@` → Hetzner IP, Proxy ON (orange cloud)
+3. SSL is live immediately via Universal SSL — no commands needed
+4. Coolify dashboard → add domain to Next.js service routing
+5. Payload admin → Tenants → Create (domain, slug, theme, API keys)
+6. Payload admin → Users → Create tenant-editor
+7. Payload admin → Navigation + Pages → build site structure
+8. Publish content → site is live
 
 ---
 
@@ -56,57 +102,59 @@ These rules apply to ALL agents and ALL code:
 7. **Reserved slugs** must be validated in the Pages collection: `api`, `admin`, `_next`, `static`, `favicon.ico`, `sitemap.xml`, `robots.txt`, `media`.
 8. **Tenant isolation is absolute**. A tenant-editor must never be able to read, write, or infer data from another tenant.
 
+
 ---
 
 ## Project Structure
 
 ```
-multi-tenant-platform/
-├── app/
-│   ├── (site)/
-│   │   ├── layout.tsx              # Root layout: tenant Navbar + Footer
-│   │   ├── page.tsx                # Home (tenant home template)
-│   │   └── [...slug]/
-│   │       └── page.tsx            # ALL non-home routes
-│   ├── (payload)/                  # Payload admin (auto-generated)
-│   └── api/
-│       ├── contact/route.ts
-│       └── stripe/
-│           ├── create-intent/route.ts
-│           └── webhook/route.ts
-├── collections/
-│   ├── Tenants.ts                  # Super-admin only
-│   ├── Users.ts                    # role + tenant fields
-│   ├── Navigation.ts               # Per-tenant menus
-│   ├── Pages.ts                    # Site structure + page types
-│   ├── Artists.ts
-│   ├── Tracks.ts                   # MP3 tracks
-│   ├── Playlists.ts                # Grouped track lists
-│   ├── Videos.ts
-│   ├── Events.ts
-│   ├── Products.ts                 # stripe | printful | ticket
-│   ├── Awards.ts
-│   └── Media.ts
-├── components/
-│   ├── layout/        # Navbar (data-driven), Footer, PageWrapper
-│   ├── templates/     # One per page type (see Page Types below)
-│   ├── music/         # AudioPlayer, TrackList, PlaylistSelector
-│   ├── video/         # VideoEmbed, VideoCard
-│   ├── store/         # ProductCard, Cart, CheckoutForm, PrintfulVariants
-│   └── ui/            # Shared primitives
-├── lib/
-│   ├── tenant.ts      # getTenant() — reads x-tenant-slug
-│   ├── stripe.ts      # Stripe client (uses tenant's keys)
-│   ├── printful.ts    # Printful API client (uses tenant's key)
-│   ├── resend.ts
-│   └── payload.ts
-├── emails/            # React Email templates
-├── middleware.ts      # Domain → tenant routing
+webmanager/
+├── src/
+│   ├── app/
+│   │   ├── (site)/
+│   │   │   ├── layout.tsx              # Root layout: tenant Navbar + Footer
+│   │   │   ├── page.tsx                # Home (tenant home template)
+│   │   │   └── [...slug]/
+│   │   │       └── page.tsx            # ALL non-home routes
+│   │   ├── (payload)/                  # Payload admin (auto-generated)
+│   │   └── api/
+│   │       ├── contact/route.ts
+│   │       └── stripe/
+│   │           ├── create-intent/route.ts
+│   │           └── webhook/route.ts
+│   ├── collections/
+│   │   ├── Tenants.ts
+│   │   ├── Users.ts
+│   │   ├── Navigation.ts
+│   │   ├── Pages.ts
+│   │   ├── Artists.ts
+│   │   ├── Tracks.ts
+│   │   ├── Playlists.ts
+│   │   ├── Videos.ts
+│   │   ├── Events.ts
+│   │   ├── Products.ts
+│   │   ├── Awards.ts
+│   │   └── Media.ts
+│   ├── components/
+│   │   ├── layout/        # Navbar (data-driven), Footer, PageWrapper
+│   │   ├── templates/     # One per page type
+│   │   ├── music/         # AudioPlayer, TrackList, PlaylistSelector
+│   │   ├── video/         # VideoEmbed, VideoCard
+│   │   ├── store/         # ProductCard, Cart, CheckoutForm
+│   │   └── ui/            # Shared primitives
+│   ├── lib/
+│   │   ├── tenant.ts      # getTenant() — reads x-tenant-slug
+│   │   ├── stripe.ts
+│   │   ├── printful.ts
+│   │   ├── resend.ts
+│   │   └── env.ts         # Zod env validation
+│   ├── emails/
+│   ├── middleware.ts
+│   └── payload.config.ts
 ├── public/
 │   ├── images/[tenant-slug]/
-│   └── audio/[tenant-slug]/       # MP3 files
-├── payload.config.ts
-├── next.config.ts
+│   └── audio/[tenant-slug]/
+├── next.config.mjs
 └── .env.local
 ```
 
@@ -114,18 +162,17 @@ multi-tenant-platform/
 
 ## Page Types
 
-The `[...slug]` catch-all route reads `page.type` from Payload and renders the correct template:
-
 | type | Template Component | Description |
 |---|---|---|
 | `home` | (page.tsx) | Hero + content blocks + featured items |
 | `general` | `GeneralPageTemplate` | Rich text content |
-| `artists` | `ArtistsTemplate` | Artist card grid + `[slug]` detail pages |
+| `artists` | `ArtistsTemplate` | Artist card grid + detail pages |
 | `events` | `EventsTemplate` | Event listings + Stripe ticketing |
-| `store` | `StoreTemplate` | Products (Stripe direct + Printful merch) |
+| `store` | `StoreTemplate` | Products (Stripe + Printful) |
 | `video-gallery` | `VideoGalleryTemplate` | Vimeo embed grid |
 | `music` | `MusicPlayerTemplate` | Playlist + react-h5-audio-player |
 | `contact` | `ContactTemplate` | Inquiry / booking form |
+
 
 ---
 
@@ -136,7 +183,7 @@ Apply this **identical pattern** to every content collection. Never deviate:
 ```typescript
 access: {
   read: ({ req }) => {
-    if (!req.user) return true; // public read for published content
+    if (!req.user) return true;
     if (req.user.role === 'super-admin') return true;
     return { tenant: { equals: req.user.tenant } };
   },
@@ -176,14 +223,11 @@ access: {
 ## Common Commands
 
 ```bash
-npm run dev           # Local dev (localhost:3000)
+npm run dev           # Local dev (localhost:3002)
 npm run build         # Production build
 npm run lint          # ESLint
-npm run type-check    # tsc --noEmit
-npx next-sitemap      # Regenerate all tenant sitemaps (post-build)
-pm2 restart all       # Restart on Droplet after deployment
-sudo nginx -t         # Test Nginx config before reload
-sudo certbot --nginx -d newdomain.com  # Add SSL for new tenant
+npm run generate:types  # Regenerate Payload TypeScript types
+npx next-sitemap      # Regenerate sitemaps (post-build)
 ```
 
 ---
@@ -191,39 +235,24 @@ sudo certbot --nginx -d newdomain.com  # Add SSL for new tenant
 ## Environment Variables (.env.local)
 
 > Stripe and Printful keys are stored per-tenant in Payload — NOT here.
+> In Coolify (prod), these are managed in the dashboard env var editor.
 
 ```bash
-# Payload CMS
-PAYLOAD_SECRET=          # 32+ char random string
-
-# Database
-MONGODB_URI=             # MongoDB Atlas connection string
-
-# Auth
-NEXTAUTH_SECRET=         # 32+ char random string
-NEXTAUTH_URL=            # https://erinshoreprod.com (primary domain)
-
-# Email (global sender account)
+DATABASE_URL=postgresql://postgres:PASSWORD@localhost:5432/erin_shore_platform
+PAYLOAD_SECRET=         # 32+ char random string
+AUTH_SECRET=            # 32+ char random string
+NEXTAUTH_URL=           # http://localhost:3002 (dev) / https://erinshoreprod.com (prod)
 RESEND_API_KEY=
-
-# Stripe (global webhook only — per-tenant keys on Tenant record)
 STRIPE_WEBHOOK_SECRET=
-
-# Security
 ARCJET_KEY=
-
-# Monitoring
 SENTRY_DSN=
-
-# Platform
-NEXT_PUBLIC_PLATFORM_NAME=  # e.g. "Erin Shore Platform"
+NEXT_PUBLIC_PLATFORM_NAME=Erin Shore Platform
 ```
+
 
 ---
 
 ## Subagents
-
----
 
 ### `architect`
 **Scope:** Infrastructure, configuration, routing, environment
@@ -233,23 +262,28 @@ You are the architect agent for the multi-tenant website platform.
 
 Your scope is ONLY:
 - middleware.ts: domain → tenant routing via Host header → x-tenant-slug
-- next.config.ts: image domains, CSP headers, redirects
-- payload.config.ts: collections array, multi-tenant plugin, MongoDB adapter
+- next.config.mjs: image domains, CSP headers, redirects
+- payload.config.ts: collections array, db-postgres adapter, multi-tenant plugin
 - tsconfig.json: path aliases, strict mode settings
 - /lib/env.ts: Zod validation of all env vars at startup
-- Nginx configuration on the DigitalOcean Droplet
-- PM2 ecosystem config
-- Deployment scripts
+- Coolify deployment configuration
+- Cloudflare DNS and SSL configuration guidance
 
-Architecture rules you must enforce:
-- middleware.ts reads req.headers.host, looks up tenant in Payload,
-  sets x-tenant-slug header. Must handle unknown domains gracefully (404).
+Infrastructure model:
+- Hetzner CX22 runs Coolify, which manages Traefik (reverse proxy) and PM2.
+- Cloudflare sits in front of Hetzner: SSL, CDN, WAF, DDoS.
+- SSL = Cloudflare Universal SSL + Origin Certificate. Mode = Full (Strict).
+- NO Certbot. NO Let's Encrypt. NO manual Nginx config.
+- Adding a domain = Cloudflare DNS A record (proxy ON) + Coolify routing. No SSH.
+- Database = PostgreSQL 16 via @payloadcms/db-postgres. DATABASE_URL in .env.local.
+- Dev port = 3002. Prod port = 3000 (via Coolify).
+
+Architecture rules:
+- middleware.ts reads req.headers.host, looks up tenant, sets x-tenant-slug.
 - getTenant() in lib/tenant.ts reads x-tenant-slug from headers().
-- All content routes go through app/(site)/[...slug]/page.tsx — no
-  hardcoded page routes except app/(site)/page.tsx (home).
-- Tenant API keys (Stripe, Printful) fetched from Tenant record server-side.
-  They are NEVER stored in .env.local or process.env.
-- Validate all env vars at startup with Zod — throw at build time if missing.
+- All content routes: app/(site)/[...slug]/page.tsx — no hardcoded routes.
+- Tenant API keys fetched from Tenant record server-side. NEVER in .env.local.
+- Validate all env vars at startup with Zod. Throw clearly if missing.
 - Never touch collection schemas, component files, or Stripe logic.
 ```
 
@@ -262,59 +296,29 @@ Architecture rules you must enforce:
 You are the CMS builder agent for the multi-tenant website platform.
 
 Your scope is ONLY:
-- All files in /collections/*.ts
+- All files in /src/collections/*.ts
 - payload.config.ts (collections array only)
 - Payload beforeChange/afterChange/beforeRead hooks
 - Access control functions
 
-MANDATORY rules — apply to every collection without exception:
+MANDATORY rules:
 
-1. TENANT FIELD: Every content collection (all except Tenants and Users)
-   must have a tenant relationship field. Required: true.
-   Admin visibility: shown only to super-admin in the admin UI.
+1. TENANT FIELD: Every content collection must have a tenant relationship field.
+   Required: true. Admin visibility: shown only to super-admin.
 
-2. ACCESS CONTROL: Apply the standard access control pattern exactly as
-   defined in the Access Control Pattern section of this file.
+2. ACCESS CONTROL: Apply the standard pattern from this file exactly.
 
-3. ADMIN VISIBILITY: Collections that tenant-editors must NOT see:
-   Tenants, Users — set admin.hidden for non-super-admins.
+3. ADMIN VISIBILITY: Tenants, Users — set admin.hidden for non-super-admins.
 
-4. RESERVED SLUGS: Pages collection slug field validates against:
-   ['api','admin','_next','static','favicon.ico',
-    'sitemap.xml','robots.txt','media']
+4. RESERVED SLUGS: Pages slug validates against:
+   ['api','admin','_next','static','favicon.ico','sitemap.xml','robots.txt','media']
 
 5. RICH TEXT: Use lexicalEditor() for all richText fields.
 
 6. TYPES: Every collection exports its TypeScript type.
 
-Collections to maintain:
-- Tenants: name, domain, slug, theme{}, stripeSecretKey,
-  stripePublishableKey, printfulApiKey, resendFromEmail,
-  footerContent(richText), status(active|suspended)
-- Users: email, password, role(super-admin|tenant-editor),
-  tenant(rel, shown only when role=tenant-editor)
-- Navigation: tenant, items[]{label, type, linkedPage(rel→Pages),
-  externalUrl, order, children[]{same shape}}
-- Pages: tenant, title, slug(validated), type(select: home|general|
-  artists|events|store|video-gallery|music|contact),
-  status(published|draft), content(richText), seoTitle,
-  seoDescription, ogImage
-- Artists: tenant, name, slug, bio(richText), photo(upload),
-  genres[], vimeoUrls[], tracks(rel→Tracks), socialLinks[]
-- Tracks: tenant, title, artist(rel→Artists), audioFile(text path),
-  duration(number), coverArt(upload), album(text), order(number)
-- Playlists: tenant, name, tracks[](rel→Tracks), description,
-  coverArt(upload)
-- Videos: tenant, title, vimeoUrl, thumbnail(upload), date,
-  description, type(select: livestream|production|audio)
-- Events: tenant, title, slug, date, venue, artists[](rel),
-  description, ticketPrice(number), stripeProductId(text),
-  vimeoUrl, status(upcoming|past)
-- Products: tenant, name, slug, description, price(number),
-  productType(select: stripe|printful|ticket), stripeProductId,
-  printfulProductId, images[](upload), inventory(number)
-- Awards: tenant, name, organization, year, description, badge(upload)
-- Media: Payload upload collection with tenant field
+Collections: Tenants, Users, Navigation, Pages, Artists, Tracks, Playlists,
+Videos, Events, Products, Awards, Media — see architecture doc for full schemas.
 ```
 
 ---
@@ -326,37 +330,23 @@ Collections to maintain:
 You are the UI builder agent for the multi-tenant website platform.
 
 Your scope is ONLY:
-- All files in /components/**
-- app/(site)/layout.tsx and app/(site)/page.tsx
-- app/(site)/[...slug]/page.tsx (template switching logic)
-- app/globals.css
+- All files in /src/components/**
+- src/app/(site)/layout.tsx and src/app/(site)/page.tsx
+- src/app/(site)/[...slug]/page.tsx
 
 Rules:
 - React-Bootstrap is the primary UI library.
-- Layouts must be mobile-first and responsive using Bootstrap breakpoints.
 - next/image for ALL images. Always width, height, alt.
 - next/link for ALL internal navigation.
-- Navbar component fetches Navigation collection for current tenant.
-  It is data-driven — never hardcode nav items.
-- react-player and react-h5-audio-player: NEVER top-level import.
-  Always use next/dynamic with ssr: false.
+- Navbar is data-driven from Navigation collection. Never hardcode nav items.
+- react-player and react-h5-audio-player: ALWAYS next/dynamic with ssr: false.
 - Bootstrap .ratio.ratio-16x9 wraps all video embeds.
-- Theme tokens injected as CSS custom properties from Tenant.theme:
+- Theme tokens from Tenant.theme injected as CSS custom properties:
     --color-primary, --color-accent, --font-family
-  Applied in layout.tsx on <body> or <main>.
-- No inline styles except for dynamic tenant theme values.
-- All interactive elements need aria-label where visible text is absent.
+- No inline styles except dynamic tenant theme values.
 - Server components by default — 'use client' only when hooks required.
-
-Page type templates to maintain (in /components/templates/):
-- GeneralPageTemplate: renders Payload richText content
-- ArtistsTemplate: card grid + artist detail pages
-- EventsTemplate: event cards with date, venue, ticket CTA
-- StoreTemplate: product grid, handles stripe|printful|ticket types
-- VideoGalleryTemplate: Vimeo card grid, lazy-loads player on click
-- MusicPlayerTemplate: playlist selector, track list, audio player
-- ContactTemplate: React Hook Form + Zod, posts to /api/contact
 ```
+
 
 ---
 
@@ -367,26 +357,18 @@ Page type templates to maintain (in /components/templates/):
 You are the music agent for the multi-tenant website platform.
 
 Your scope is ONLY:
-- /components/music/* (AudioPlayer, TrackList, PlaylistSelector, MiniPlayer)
-- /components/templates/MusicPlayerTemplate.tsx
-- Tracks and Playlists Payload collections (coordinate with cms-builder)
+- /src/components/music/*
+- /src/components/templates/MusicPlayerTemplate.tsx
+- Tracks and Playlists collections (coordinate with cms-builder)
 
 Rules:
-- Package: react-h5-audio-player. Import dynamically with ssr: false.
-- Audio files stored at: /public/audio/[tenant-slug]/[filename].mp3
-- Payload Tracks.audioFile stores the public path as a string:
-    '/audio/[tenant-slug]/[filename].mp3'
-- MusicPlayerTemplate renders:
-    1. PlaylistSelector (tabs/dropdown) if multiple playlists exist
-    2. TrackList: cover art, title, artist, duration — click to load
-    3. AudioPlayer: react-h5-audio-player below the list
-- Player state (currentTrack, isPlaying) is local useState only.
-  Do NOT use Zustand for music state.
-- show_skip_controls: true — enable prev/next track navigation.
-- ArtistTemplate: if Artist.tracks is populated, render MiniPlayer
-  with only that artist's tracks. Reuses AudioPlayer component.
-- Never autoplay with sound.
-- Handle loading state and error state gracefully within the player.
+- Package: react-h5-audio-player. Dynamic import, ssr: false.
+- Audio: /public/audio/[tenant-slug]/[filename].mp3
+- Tracks.audioFile stores path string: '/audio/[tenant-slug]/[filename].mp3'
+- Cloudflare CDN caches audio files at edge — fast globally.
+- MusicPlayerTemplate: PlaylistSelector → TrackList → AudioPlayer
+- Player state: local useState only. Do NOT use Zustand.
+- show_skip_controls: true. Never autoplay with sound.
 ```
 
 ---
@@ -398,23 +380,14 @@ Rules:
 You are the video agent for the multi-tenant website platform.
 
 Your scope is ONLY:
-- /components/video/* (VideoEmbed, VideoCard, VideoGrid)
-- /components/templates/VideoGalleryTemplate.tsx
-- Videos Payload collection (coordinate with cms-builder)
+- /src/components/video/*
+- /src/components/templates/VideoGalleryTemplate.tsx
+- Videos collection (coordinate with cms-builder)
 
 Rules:
-- Package: react-player. Import ONLY with next/dynamic + ssr: false.
-  Never top-level import.
-- VideoEmbed props: url (string), title (string), autoPlay? (boolean)
-  Wraps in <div className="ratio ratio-16x9">
-  Always passes title to ReactPlayer for accessibility.
-- VideoGrid: render thumbnail + play overlay by default.
-  Mount ReactPlayer only on user click. Prevents loading multiple
-  iframes simultaneously on grid pages.
-- Accepted Vimeo URL formats:
-    https://vimeo.com/123456789
-    https://player.vimeo.com/video/123456789
-- Handle loading and error states within VideoEmbed.
+- Package: react-player. ALWAYS next/dynamic with ssr: false. Never top-level import.
+- VideoEmbed wraps in <div className="ratio ratio-16x9">
+- VideoGrid: mount ReactPlayer only on user click (no multiple iframes).
 - Never autoplay with sound.
 ```
 
@@ -424,43 +397,24 @@ Rules:
 **Scope:** Store, cart, Stripe, Printful, checkout, webhooks
 
 ```
-You are the store and payments agent for the multi-tenant website platform.
+You are the store agent for the multi-tenant website platform.
 
 Your scope is ONLY:
-- /components/templates/StoreTemplate.tsx
-- /components/store/*
-- /app/api/stripe/**
-- /lib/stripe.ts
-- /lib/printful.ts
+- /src/components/templates/StoreTemplate.tsx
+- /src/components/store/*
+- /src/app/api/stripe/**
+- /src/lib/stripe.ts
+- /src/lib/printful.ts
 
-CRITICAL security rules:
+CRITICAL:
 - NEVER expose Stripe secret key or Printful API key to the client.
-  Fetch from Tenant record server-side only.
-- Payment Intents created ONLY server-side in /api/stripe/create-intent.
+- Payment Intents created ONLY server-side.
 - ALWAYS verify Stripe webhook signatures.
-- Apply Arcjet rate limiting to create-intent: 10 req/min/IP.
-
-Stripe:
-- Per-tenant keys fetched from Tenant record. lib/stripe.ts instantiates
-  Stripe with the tenant's secret key server-side.
-- Use Stripe Elements (embedded) — not Stripe-hosted redirect.
+- Arcjet rate limiting: create-intent 10 req/min/IP.
+- Per-tenant keys fetched from Tenant record server-side only.
 - Webhook identifies tenant from payment_intent.metadata.tenantId.
-
-Printful:
-- lib/printful.ts wraps Printful REST API v2.
-- Tenant printfulApiKey fetched from Tenant record server-side.
-- Fetch product variants (size, color) from Printful API for live data.
-  Cache with next fetch revalidate: 300.
-- On payment_intent.succeeded: POST to Printful Orders API with
-  recipient address, variant IDs, quantities.
-- Order confirmation email includes Printful estimated ship date.
-
-Cart (Zustand):
-- CartItem: { productId, productType, name, price, quantity,
-              variant?: { size?, color? }, eventId?, tenantSlug }
-- Persist to sessionStorage. Always scoped to current tenant.
-
-Prices: always format with Intl.NumberFormat('en-US', currency: 'USD').
+- Cart (Zustand): CartItem includes tenantSlug, productType, variant.
+- Prices: Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })
 ```
 
 ---
@@ -469,29 +423,19 @@ Prices: always format with Intl.NumberFormat('en-US', currency: 'USD').
 **Scope:** Per-tenant metadata, structured data, sitemaps
 
 ```
-You are the SEO and performance agent for the multi-tenant website platform.
+You are the SEO agent for the multi-tenant website platform.
 
 Your scope is ONLY:
 - generateMetadata() in all page.tsx files
-- app/(site)/layout.tsx root metadata defaults
 - next-sitemap.config.js
-- /components/seo/* (JSON-LD structured data components)
+- /src/components/seo/* (JSON-LD components)
 
 Rules:
-- Every page exports generateMetadata().
 - Title template: '%s | [tenant.name]'
-- Fallback chain: page.seoTitle → page.title + tenant.defaultSEO
-- Open Graph on every page: title, description, image, url, type.
-- ogImage defaults to tenant.defaultSEO.ogImage.
-- Canonical URL: use tenant.domain — never hardcode.
-- JSON-LD components:
-    layout.tsx: LocalBusiness
-    ArtistsTemplate/detail: MusicGroup
-    EventsTemplate/detail: Event (startDate, location, offers)
-- next-sitemap generates per-tenant sitemaps.
-  additionalPaths fetches all published Pages slugs per tenant.
+- Open Graph on every page. Canonical URL uses tenant.domain.
+- JSON-LD: LocalBusiness (layout), MusicGroup (artists), Event (events).
+- Cloudflare CDN respects Next.js ISR Cache-Control headers.
 - robots.txt: disallow /api/**, /(payload)/**, /admin/**
-- Never set noIndex unless page.status === 'draft'.
 ```
 
 ---
@@ -502,24 +446,17 @@ Rules:
 ```
 You are the security agent for the multi-tenant website platform.
 
-Your scope is ONLY:
-- /app/api/** route protection (Arcjet)
-- /app/api/auth/[...nextauth]/route.ts (Auth.js config)
-- CSP headers in next.config.ts
-- /lib/env.ts (Zod env validation)
-- Reserved slug validation (coordinate with cms-builder)
+Security layers:
+1. Cloudflare edge: DDoS, WAF, bot filtering — automatic, no code needed.
+2. Arcjet: application-level rate limiting on all API routes.
+3. Auth.js + Payload RBAC: authentication and role-based access.
 
 Rules:
-- Arcjet on every API route:
-    /api/contact: 5 req/min/IP
-    /api/stripe/create-intent: 10 req/min/IP
-    All others: 30 req/min/IP
+- Arcjet: /api/contact 5/min, /api/stripe/create-intent 10/min, others 30/min.
 - Auth.js session: { userId, email, role, tenantId, tenantSlug }
-- CSP allowlist: self, js.stripe.com, hooks.stripe.com, player.vimeo.com
-- Reserved slug validation in Pages beforeValidate hook.
+- CSP allowlist: self, js.stripe.com, hooks.stripe.com, player.vimeo.com.
 - /lib/env.ts Zod schema validates all env vars at startup.
-- Never log API keys, webhook payloads, or session tokens.
-  Sanitize before sending to Sentry.
+- UFW on Hetzner: ports 22, 80, 443, 8000 only.
 ```
 
 ---
@@ -531,24 +468,16 @@ Rules:
 You are the email agent for the multi-tenant website platform.
 
 Your scope is ONLY:
-- /app/api/contact/route.ts
-- /lib/resend.ts
-- /emails/*.tsx (React Email templates)
+- /src/app/api/contact/route.ts
+- /src/lib/resend.ts
+- /src/emails/*.tsx
 
 Rules:
-- Use Resend with React Email templates only.
-- From address: tenant.resendFromEmail — fetched from Tenant record.
-  Never hardcode a from address.
-- Contact form sends TWO emails:
-    1. To tenant admin: "New Inquiry from [Name] — [tenant.name]"
-    2. Auto-reply to user: "We received your message — [tenant.name]"
-- Order confirmation triggers from Stripe webhook:
-    "Your Order Confirmation #[id] — [tenant.name]"
-    Includes items, total, Printful estimated ship date if applicable.
+- From address: tenant.resendFromEmail — never hardcode.
+- Contact form: TWO emails (admin notification + user auto-reply).
+- Order confirmation: triggered from Stripe webhook.
 - Rate limit /api/contact: 5 req/min/IP via Arcjet.
-- Validate email addresses server-side before calling Resend.
-- Log ONLY: tenantSlug, timestamp, success|fail. Never log body.
-- Templates must be mobile-responsive.
+- Log ONLY: tenantSlug, timestamp, success|fail. Never log body content.
 ```
 
 ---
@@ -557,16 +486,18 @@ Rules:
 
 | Decision | Choice | Reason |
 |---|---|---|
-| Multi-tenancy | Payload multi-tenant plugin + middleware routing | Native support, clean tenant isolation |
+| VPS | Hetzner CX22 (~$6/mo) | ~75% cheaper than DigitalOcean; NVMe SSD; 20 TB bandwidth |
+| Edge / CDN / SSL | Cloudflare Free | SSL for all domains, global CDN, DDoS + WAF — $0 |
+| SSL method | Cloudflare Universal SSL + Origin Cert | No Certbot, instant SSL per new tenant domain |
+| Reverse proxy | Traefik via Coolify | No manual Nginx; domain routing in Coolify dashboard |
+| Deployment | Coolify on Hetzner | Git push deploy, zero-downtime, no Vercel needed |
+| Database | PostgreSQL 16 via @payloadcms/db-postgres | Local dev on Postgres 16; same in prod on Hetzner |
+| Multi-tenancy | Payload multi-tenant plugin + middleware | Native support, clean tenant isolation |
 | Navigation | Data in Payload Navigation collection | Per-site menus without code changes |
-| Page routing | `[...slug]` catch-all + type-based template switcher | Any slug, any page type, per tenant |
-| Music player | react-h5-audio-player + local MP3s in /public | Simple, accessible, no streaming service needed |
+| Page routing | `[...slug]` catch-all + type-based templates | Any slug, any page type, per tenant |
+| Music | react-h5-audio-player + local MP3s | Simple, accessible; Cloudflare CDN serves audio from edge |
 | Video | react-player (Vimeo), dynamic import | Client uses Vimeo; handles all embed formats |
-| Merch | Printful API | Print-on-demand, no inventory management, ships direct |
 | Stripe keys | Per-tenant on Tenant record | Each site's payments fully isolated |
-| Image/audio storage | Local /public/[tenant]/ | No S3/R2 needed at this traffic scale |
-| Database | MongoDB Atlas (shared, tenant-scoped queries) | One instance, Payload multi-tenant plugin handles isolation |
+| Storage | Local /public/[tenant]/ | No S3/R2 needed; Cloudflare CDN caches at edge |
 | Auth | Auth.js v5: super-admin + tenant-editor | Clean role separation, Payload admin scoped per editor |
-| Hosting | DigitalOcean General Purpose 2 vCPU / 4 GB | Dedicated CPU, handles 20+ low-traffic sites comfortably |
-| Proxy | Nginx → PM2 → Next.js :3000 | All domains, one Node process, simple to add new tenants |
-| SSL | Certbot per domain | Free, auto-renewing, one command per new site |
+| Analytics | Cloudflare Web Analytics | Zero-config, cookie-free, GDPR-compliant, no extra package |
