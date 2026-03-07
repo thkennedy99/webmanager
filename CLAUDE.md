@@ -501,3 +501,256 @@ Rules:
 | Storage | Local /public/[tenant]/ | No S3/R2 needed; Cloudflare CDN caches at edge |
 | Auth | Auth.js v5: super-admin + tenant-editor | Clean role separation, Payload admin scoped per editor |
 | Analytics | Cloudflare Web Analytics | Zero-config, cookie-free, GDPR-compliant, no extra package |
+
+
+---
+
+## Testing Strategy
+
+### Overview
+
+All UI and functional testing uses **Playwright** (already installed in this repo).
+Claude Code must write and run Playwright tests as part of every build cycle —
+not as an afterthought. Tests verify both functionality AND visual quality.
+
+### Running Tests
+
+```bash
+# Run all tests headless
+npx playwright test
+
+# Run with visible browser (use this to watch UI render)
+npx playwright test --headed
+
+# Run a specific test file
+npx playwright test tests/ui/homepage.spec.ts --headed
+
+# View full visual report with screenshots
+npx playwright show-report
+
+# Run only UI design tests
+npx playwright test --grep "@ui"
+
+# Run only functional tests
+npx playwright test --grep "@functional"
+```
+
+### Test File Structure
+
+```
+tests/
+├── ui/
+│   ├── homepage.spec.ts        # Home page visual + layout
+│   ├── navigation.spec.ts      # Navbar renders correctly per tenant
+│   ├── music-player.spec.ts    # Player loads, controls work
+│   ├── video-gallery.spec.ts   # Vimeo embeds render
+│   ├── store.spec.ts           # Product grid, cart
+│   ├── contact.spec.ts         # Form renders, validates
+│   └── typography.spec.ts      # Fonts, sizing, readability
+├── functional/
+│   ├── tenant-routing.spec.ts  # Host header → correct tenant
+│   ├── auth.spec.ts            # Login, role access
+│   └── api/
+│       ├── contact.spec.ts
+│       └── stripe.spec.ts
+└── helpers/
+    ├── setup.ts                # Test tenant seed data
+    └── assertions.ts           # Reusable UI quality checks
+```
+
+
+### UI Design Quality Standards
+
+Every page Claude Code builds MUST pass these visual quality checks before
+the task is considered complete. These are non-negotiable standards.
+
+#### Typography & Readability
+- Body text minimum **16px**, line-height minimum **1.5**
+- Headings use a clear visual hierarchy (h1 > h2 > h3 — never skip levels)
+- No text smaller than 14px anywhere on the page
+- Sufficient contrast: body text must pass WCAG AA (4.5:1 ratio minimum)
+- Never use `font-weight: 300` (thin) for body text — use 400 or higher
+- Links must be visually distinct from surrounding text (color + underline or bold)
+
+#### Spacing & Layout
+- Consistent padding/margin using Bootstrap spacing scale (never random px values)
+- No content touches the edge of the viewport — minimum 16px horizontal padding on mobile
+- Sections have clear visual separation (padding, dividers, or background contrast)
+- Cards and list items have consistent spacing between them
+- Page content is never wider than 1200px (use Bootstrap container)
+
+#### Color & Contrast
+- Tenant theme colors applied consistently via CSS custom properties
+- No clashing color combinations — accent color used sparingly (CTAs, highlights only)
+- Background colors provide clear contrast with text
+- Interactive elements (buttons, links) have visible hover and focus states
+
+#### Mobile Responsiveness
+- Every page tested at 375px (iPhone SE), 768px (tablet), 1280px (desktop)
+- No horizontal scrolling at any breakpoint
+- Navigation collapses to hamburger menu on mobile
+- Images scale correctly and never overflow their containers
+- Font sizes remain readable on mobile (no smaller than 14px)
+
+#### Professional Polish
+- No Lorem Ipsum or placeholder text in any rendered component
+- Images always have proper aspect ratios — never stretched or distorted
+- Loading states are handled gracefully (skeleton screens or spinners)
+- Error states are styled, not raw browser defaults
+- Forms have visible labels, placeholder text, and validation messages styled consistently
+- No broken layouts caused by long text strings or empty data states
+
+
+### Playwright UI Quality Test Pattern
+
+Every UI test file must follow this pattern — test both functionality
+AND visual quality in the same spec:
+
+```typescript
+import { test, expect } from '@playwright/test';
+
+test.describe('Homepage @ui', () => {
+
+  test.beforeEach(async ({ page }) => {
+    // Set host header to simulate tenant routing
+    await page.goto('http://localhost:3002', {
+      headers: { host: 'erinshoreprod.com' }
+    });
+  });
+
+  // ── FUNCTIONAL ──────────────────────────────────────────────────
+
+  test('renders without errors @functional', async ({ page }) => {
+    await expect(page).not.toHaveTitle(/error/i);
+    const errors: string[] = [];
+    page.on('console', msg => {
+      if (msg.type() === 'error') errors.push(msg.text());
+    });
+    expect(errors).toHaveLength(0);
+  });
+
+  // ── TYPOGRAPHY & READABILITY ────────────────────────────────────
+
+  test('body text meets minimum size 16px', async ({ page }) => {
+    const bodyFontSize = await page.evaluate(() => {
+      const body = document.querySelector('p, .lead, main');
+      return body ? parseInt(getComputedStyle(body).fontSize) : 0;
+    });
+    expect(bodyFontSize).toBeGreaterThanOrEqual(16);
+  });
+
+  test('heading hierarchy is correct', async ({ page }) => {
+    const h1Count = await page.locator('h1').count();
+    expect(h1Count).toBe(1); // exactly one h1 per page
+    const h1Size = await page.evaluate(() => {
+      const h1 = document.querySelector('h1');
+      return h1 ? parseInt(getComputedStyle(h1).fontSize) : 0;
+    });
+    expect(h1Size).toBeGreaterThanOrEqual(28);
+  });
+
+  // ── LAYOUT & SPACING ────────────────────────────────────────────
+
+  test('no horizontal scroll at mobile 375px', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    const scrollWidth = await page.evaluate(() => document.body.scrollWidth);
+    const clientWidth = await page.evaluate(() => document.body.clientWidth);
+    expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
+  });
+
+  test('content has proper horizontal padding on mobile', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    const mainPadding = await page.evaluate(() => {
+      const main = document.querySelector('main, .container');
+      if (!main) return 0;
+      return parseInt(getComputedStyle(main).paddingLeft);
+    });
+    expect(mainPadding).toBeGreaterThanOrEqual(12);
+  });
+
+  // ── SCREENSHOTS (visual review) ─────────────────────────────────
+
+  test('screenshot: desktop 1280px', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await expect(page).toHaveScreenshot('homepage-desktop.png', {
+      fullPage: true,
+      animations: 'disabled',
+    });
+  });
+
+  test('screenshot: mobile 375px', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await expect(page).toHaveScreenshot('homepage-mobile.png', {
+      fullPage: true,
+      animations: 'disabled',
+    });
+  });
+
+});
+```
+
+
+### Claude Code Build + Test Workflow
+
+When Claude Code builds any component or page, it MUST follow this cycle:
+
+```
+1. Write component / page code
+2. Run: npm run build  (catch TypeScript + build errors)
+3. If build passes → Run: npx playwright test --headed (watch in browser)
+4. Review screenshot output in: playwright-report/
+5. Check ALL UI quality standards above are met
+6. If any standard fails → fix and repeat from step 2
+7. Only mark task complete when ALL tests pass AND screenshots look professional
+```
+
+**Claude Code must NEVER skip the Playwright step.**
+**Claude Code must NEVER mark a UI task complete without running tests.**
+**If tests fail, Claude Code fixes the issue before moving on.**
+
+### Reusable Assertions (tests/helpers/assertions.ts)
+
+Claude Code should build and maintain a shared assertions helper:
+
+```typescript
+// tests/helpers/assertions.ts
+import { Page, expect } from '@playwright/test';
+
+export async function assertProfessionalUI(page: Page) {
+  // No horizontal scroll at mobile
+  await page.setViewportSize({ width: 375, height: 812 });
+  const scrollWidth = await page.evaluate(() => document.body.scrollWidth);
+  expect(scrollWidth).toBeLessThanOrEqual(375 + 2);
+
+  // Body text >= 16px
+  const fontSize = await page.evaluate(() => {
+    const el = document.querySelector('p');
+    return el ? parseInt(getComputedStyle(el).fontSize) : 16;
+  });
+  expect(fontSize).toBeGreaterThanOrEqual(16);
+
+  // Exactly one h1
+  const h1Count = await page.locator('h1').count();
+  expect(h1Count).toBe(1);
+
+  // No console errors
+  const errors: string[] = [];
+  page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
+  expect(errors.filter(e => !e.includes('favicon'))).toHaveLength(0);
+}
+
+export async function takeResponsiveScreenshots(page: Page, name: string) {
+  for (const [label, width, height] of [
+    ['mobile', 375, 812],
+    ['tablet', 768, 1024],
+    ['desktop', 1280, 800],
+  ] as const) {
+    await page.setViewportSize({ width, height });
+    await page.screenshot({
+      path: `test-results/screenshots/${name}-${label}.png`,
+      fullPage: true,
+    });
+  }
+}
+```
+
