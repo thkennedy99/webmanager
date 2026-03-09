@@ -1,0 +1,11 @@
+node_modules
+.next
+.git
+.env*
+test.env
+*.md
+tests/
+.cursor/
+.vscode/
+playwright-report/
+test-results/
