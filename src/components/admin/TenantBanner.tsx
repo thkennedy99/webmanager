@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTenantSelection } from '@payloadcms/plugin-multi-tenant/client'
 
 const adminThemeCSS = `
@@ -195,6 +195,7 @@ export default function TenantBanner() {
   const { selectedTenantID, options } = useTenantSelection()
   const [tenantSlug, setTenantSlug] = useState<string | null>(null)
   const [features, setFeatures] = useState<TenantFeatures>({})
+  const bannerRef = useRef<HTMLDivElement>(null)
 
   const selectedOption = options.find(
     (opt) => String(opt.value) === String(selectedTenantID),
@@ -221,6 +222,28 @@ export default function TenantBanner() {
       })
   }, [selectedTenantID])
 
+  // Pin the banner at the top of the sidebar scroll container
+  useEffect(() => {
+    const el = bannerRef.current
+    if (!el) return
+
+    // Walk up to find the .nav element (the sidebar scroll container)
+    let nav: HTMLElement | null = el.parentElement
+    while (nav && !nav.classList.contains('nav')) {
+      nav = nav.parentElement
+    }
+    if (!nav) return
+
+    // The .nav element is the scroll container — make the banner's
+    // immediate wrapper (beforeNav slot) sticky within it
+    const wrapper = el.parentElement
+    if (wrapper && wrapper.parentElement === nav) {
+      wrapper.style.position = 'sticky'
+      wrapper.style.top = '0'
+      wrapper.style.zIndex = '100'
+    }
+  }, [])
+
   // Build CSS to hide disabled feature groups in nav
   const featureHideCSS = [
     !features.enableVideoGrid && `[id="nav-group-Video Grid"] { display: none !important; }`,
@@ -238,12 +261,16 @@ export default function TenantBanner() {
       <style dangerouslySetInnerHTML={{ __html: adminThemeCSS }} />
       {featureHideCSS && <style dangerouslySetInnerHTML={{ __html: featureHideCSS }} />}
       <div
+        ref={bannerRef}
         style={{
           padding: '10px 12px',
           background: 'linear-gradient(135deg, #1A6B37 0%, #22844a 100%)',
           color: '#ffffff',
           borderBottom: '3px solid #F26522',
           overflow: 'hidden',
+          position: 'sticky',
+          top: 0,
+          zIndex: 100,
         }}
       >
         <div
