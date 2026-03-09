@@ -17,7 +17,6 @@ RUN npm install --legacy-peer-deps
 # Rebuild the source code only when needed
 FROM base AS builder
 WORKDIR /app
-ENV NODE_ENV=development
 
 # Payload needs DATABASE_URL at build time for schema introspection
 ARG DATABASE_URL
@@ -26,6 +25,8 @@ ENV DATABASE_URL=${DATABASE_URL}
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# Build in production mode (deps already installed with devDependencies above)
+ENV NODE_ENV=production
 RUN npm run build
 
 # Production image, copy all the files and run next
