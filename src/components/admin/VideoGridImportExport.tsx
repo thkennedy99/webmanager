@@ -51,8 +51,9 @@ export default function VideoGridImportExport() {
   const handleExport = useCallback(
     (empty: boolean) => {
       if (!selectedTenantID) return
+      const cacheBust = `&_t=${Date.now()}`
       window.open(
-        `/api/video-grid/export?tenantId=${selectedTenantID}${empty ? '&empty=true' : ''}`,
+        `/api/video-grid/export?tenantId=${selectedTenantID}${empty ? '&empty=true' : ''}${cacheBust}`,
         '_blank',
       )
     },

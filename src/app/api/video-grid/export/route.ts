@@ -181,6 +181,8 @@ export async function GET(request: NextRequest) {
       headers: {
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'Content-Disposition': `attachment; filename="${filename}"`,
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'CDN-Cache-Control': 'no-store',
       },
     })
   } catch {
