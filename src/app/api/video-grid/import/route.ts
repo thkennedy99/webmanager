@@ -6,7 +6,12 @@ import ExcelJS from 'exceljs'
 /**
  * POST /api/video-grid/import
  * Imports video grid items from an Excel spreadsheet.
- * Columns: Title, Video URL, Year, Instruments (comma-separated), Location
+ *
+ * Supports two column layouts:
+ *   6-col: Title | Video URL | Platform | Year | Instruments | Location
+ *   5-col (legacy): Title | Video URL | Year | Instruments | Location
+ *
+ * The header row is inspected to detect which layout is in use.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -35,6 +40,33 @@ export async function POST(request: NextRequest) {
 
     const payload = await getPayload({ config: await config })
     const tid = Number(tenantId)
+
+    // Detect column layout by inspecting the header row
+    const headerRow = worksheet.getRow(1)
+    const headers: string[] = []
+    headerRow.eachCell({ includeEmpty: false }, (cell) => {
+      headers.push(String(cell.value || '').trim().toLowerCase())
+    })
+
+    // Build a map of column name → 1-based column index
+    const colIndex: Record<string, number> = {}
+    headers.forEach((h, i) => {
+      if (h.includes('title')) colIndex.title = i + 1
+      else if (h.includes('url') || h.includes('video url')) colIndex.videoUrl = i + 1
+      else if (h.includes('platform')) colIndex.platform = i + 1
+      else if (h.includes('year')) colIndex.year = i + 1
+      else if (h.includes('instrument')) colIndex.instruments = i + 1
+      else if (h.includes('location')) colIndex.location = i + 1
+    })
+
+    // Fallback to positional detection if headers not found
+    if (!colIndex.title) colIndex.title = 1
+    if (!colIndex.videoUrl) colIndex.videoUrl = 2
+    // If Platform column exists it shifts Year/Instruments/Location by 1
+    const hasPlatformCol = !!colIndex.platform
+    if (!colIndex.year) colIndex.year = hasPlatformCol ? 4 : 3
+    if (!colIndex.instruments) colIndex.instruments = hasPlatformCol ? 5 : 4
+    if (!colIndex.location) colIndex.location = hasPlatformCol ? 6 : 5
 
     // Pre-fetch existing instruments and locations for this tenant
     const [existingInstruments, existingLocations] = await Promise.all([
@@ -66,10 +98,16 @@ export async function POST(request: NextRequest) {
     let errors = 0
     const errorMessages: string[] = []
 
-    // Skip header row
-    worksheet.eachRow({ includeEmpty: false }, async () => {})
+    interface ParsedRow {
+      title: string
+      videoUrl: string
+      platform: string
+      year: number | null
+      instruments: string
+      location: string
+    }
 
-    const rows: { title: string; videoUrl: string; year: number | null; instruments: string; location: string }[] = []
+    const rows: ParsedRow[] = []
     let isHeader = true
 
     worksheet.eachRow({ includeEmpty: false }, (row) => {
@@ -78,15 +116,18 @@ export async function POST(request: NextRequest) {
         return
       }
 
-      const title = String(row.getCell(1).value || '').trim()
-      const videoUrl = String(row.getCell(2).value || '').trim()
-      const yearVal = row.getCell(3).value
+      const title = String(row.getCell(colIndex.title).value || '').trim()
+      const videoUrl = String(row.getCell(colIndex.videoUrl).value || '').trim()
+      const platformVal = colIndex.platform
+        ? String(row.getCell(colIndex.platform).value || '').trim().toLowerCase()
+        : ''
+      const yearVal = row.getCell(colIndex.year).value
       const year = typeof yearVal === 'number' ? yearVal : yearVal ? Number(yearVal) : null
-      const instruments = String(row.getCell(4).value || '').trim()
-      const location = String(row.getCell(5).value || '').trim()
+      const instruments = String(row.getCell(colIndex.instruments).value || '').trim()
+      const location = String(row.getCell(colIndex.location).value || '').trim()
 
       if (title && videoUrl) {
-        rows.push({ title, videoUrl, year, instruments, location })
+        rows.push({ title, videoUrl, platform: platformVal, year, instruments, location })
       }
     })
 
@@ -99,7 +140,6 @@ export async function POST(request: NextRequest) {
           for (const name of names) {
             let id = instrumentMap.get(name.toLowerCase())
             if (!id) {
-              // Create new instrument
               const created = await payload.create({
                 collection: 'video-grid-instruments',
                 data: { name, tenant: tid } as never,
@@ -128,9 +168,11 @@ export async function POST(request: NextRequest) {
           locationId = id
         }
 
-        // Detect platform
+        // Detect platform — use explicit value from spreadsheet, or auto-detect from URL
         let platform: string | undefined
-        if (row.videoUrl.includes('youtube.com') || row.videoUrl.includes('youtu.be')) {
+        if (row.platform === 'youtube' || row.platform === 'vimeo') {
+          platform = row.platform
+        } else if (row.videoUrl.includes('youtube.com') || row.videoUrl.includes('youtu.be')) {
           platform = 'youtube'
         } else if (row.videoUrl.includes('vimeo.com')) {
           platform = 'vimeo'
